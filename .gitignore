@@ -1,0 +1,68 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+build/
+dist/
+dist2/
+*.egg-info/
+.eggs/
+*.egg
+*.whl
+
+# PyInstaller
+*.spec
+*.pyz
+localpycs/
+_internal/
+
+# Virtual environments
+env/
+venv/
+.venv/
+ENV/
+pip-wheel-metadata/
+
+# Editor directories and files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and databases
+*.log
+*.sqlite3
+*.db
+
+# Session files (tg session, etc.)
+*.session
+*.session-shm
+*.session-wal
+
+# Coverage
+htmlcov/
+.coverage
+.coverage.*
+
+# pytest
+.pytest_cache/
+.cache/
+
+# Misc
+*.pyc
+*.pyo
+*.pyd
+*.bak
+*.swp
+*.tmp
+*.temp
