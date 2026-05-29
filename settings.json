@@ -3,7 +3,7 @@
   "telegram_api_hash": "b18441a1ff607e10a989891a5462e627",
   "telegram_folder": "娱乐",
   "ai_base_url": "https://unifiedapi.cloud/v1",
-  "ai_api_key": "sk-yU2oV4iW8l2Tz2IIrrPAJ18LObAZyyu5cZh9ZCl3m0HvwOO2",
+  "ai_api_key": "",
   "ai_model": "claude-opus-4-6",
   "delay_min": 3,
   "delay_max": 6,
