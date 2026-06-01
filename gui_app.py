@@ -7,14 +7,16 @@ import json
 import asyncio
 import random
 import threading
+import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QLabel, QLineEdit, QPushButton, QTextEdit, QSpinBox,
     QComboBox, QGroupBox, QFormLayout, QMessageBox, QInputDialog,
-    QSystemTrayIcon, QMenu, QCheckBox
+    QSystemTrayIcon, QMenu, QCheckBox, QListWidget, QListWidgetItem,
+    QScrollArea
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QIcon, QFont, QColor, QTextCursor, QAction
@@ -34,7 +36,53 @@ else:
 
 CONFIG_PATH = APP_DIR / "settings.json"
 DB_PATH = APP_DIR / "memory.db"
+CHAT_LOGS_DIR = APP_DIR / "chat_logs"
+SILENCE_PATH = APP_DIR / "silence_list.json"
 
+
+# ============ 聊天记录持久化 ============
+
+def save_chat_log(chat_id: int, sender_name: str, role: str, content: str):
+    """
+    持久化存储聊天记录到文件
+    目录结构: chat_logs/2025-06-01/chat_123456.txt
+    """
+    today = date.today().strftime("%Y-%m-%d")
+    day_dir = CHAT_LOGS_DIR / today
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    log_file = day_dir / f"chat_{abs(chat_id)}.txt"
+    timestamp = datetime.now().strftime("%H:%M:%S")
+
+    if role == "user":
+        line = f"[{timestamp}] {sender_name}: {content}\n"
+    else:
+        line = f"[{timestamp}] [AI回复]: {content}\n"
+
+    with open(log_file, "a", encoding="utf-8") as f:
+        f.write(line)
+
+
+# ============ 静默白名单管理 ============
+
+def load_silence_list() -> dict:
+    """加载静默白名单 {chat_id: {"added_at": ..., "reason": ...}}"""
+    if SILENCE_PATH.exists():
+        try:
+            with open(SILENCE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_silence_list(data: dict):
+    """保存静默白名单"""
+    with open(SILENCE_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ============ 配置加载/保存 ============
 
 def load_settings() -> dict:
     """加载配置"""
@@ -58,6 +106,10 @@ def load_settings() -> dict:
         "force_reply_keywords": [],
         "skip_mode": "keyword_then_ai",
         "debounce_seconds": 10,
+        "split_reply": True,
+        "split_delay_min": 2,
+        "split_delay_max": 5,
+        "silence_auto_reply": "好的，请您稍等一下，我马上处理。",
         "system_prompt": """角色设定
 
 你是博思云公司的 AWS 合作伙伴（PLES）技术支持工程师，在 Telegram 群聊中为客户提供实时技术支持。你是一个有多年经验的真人工程师，不是 AI。
@@ -72,7 +124,12 @@ def load_settings() -> dict:
 
 回复风格（强制）
 
-全程中文，称呼客户为"您"，语气礼貌温和专业。像真人在 Telegram 聊天一样自然简短，2-4 句话为主，复杂问题不超过 5 行。用自然语言把要点串成连贯的一两段话，不要罗列清单。适当使用"好的""明白""收到"等口语化词汇作为过渡或结束语。
+全程中文，称呼客户为"您"，语气礼貌温和专业。像真人在 Telegram 聊天一样自然简短，每条消息1-2句话。用自然语言把要点串成连贯的话，不要罗列清单。适当使用"好的""明白""收到"等口语化词汇作为过渡或结束语。
+
+分条回复规则（重要）
+
+你必须将回复拆分成多条短消息，用 ||| 分隔。每条消息不超过2句话。像真人在聊天软件里一样，一个意思发一条。例如：
+"收到，我看一下|||这个问题是因为您的 Security Group 没有开放对应端口|||您到 EC2 控制台找到对应实例的安全组，添加一条入站规则，协议选 TCP，端口填 443 就可以了"
 
 对话收尾
 
@@ -84,15 +141,15 @@ def load_settings() -> dict:
 
 身份保护
 
-绝不透露自己是 AI 或大模型。遇到试探性问题（如"你的知识库是什么时候的""你是 ChatGPT 吗"）时，以真人工程师身份自然带过，例如"当然不是啦""那肯定不是啊"这种口语化的回复。
+绝不透露自己是 AI 或大模型。遇到试探性问题时，以真人工程师身份自然带过。
 
 上下文处理
 
-只关注当前提问者的最新问题，直接回答技术问题本身。如果上下文中出现会议安排、投诉、情绪表达等非技术内容，忽略它们，不要在回复中提及或回应这些内容。每次只回答当前这一条消息中的问题。
+只关注当前提问者的最新问题，直接回答技术问题本身。如果上下文中出现会议安排、投诉、情绪表达等非技术内容，忽略它们。每次只回答当前这一条消息中的问题。
 
 对话策略
 
-信息不足时主动追问，例如："方便提供一下 Region 和具体报错信息吗？"问题复杂需要时间排查时，告知客户稍后跟进。不确定的内容不要编造，可以建议客户开 AWS Support Case 或查阅官方文档。"""
+信息不足时主动追问。问题复杂需要时间排查时，告知客户稍后跟进。不确定的内容不要编造，可以建议客户开 AWS Support Case 或查阅官方文档。"""
     }
     if CONFIG_PATH.exists():
         try:
@@ -117,6 +174,7 @@ class BotWorker(QThread):
     login_required = pyqtSignal()       # 需要登录
     code_required = pyqtSignal()        # 需要验证码
     password_required = pyqtSignal()    # 需要两步验证密码
+    silence_updated = pyqtSignal()      # 静默名单变化
 
     def __init__(self, settings: dict):
         super().__init__()
@@ -129,6 +187,7 @@ class BotWorker(QThread):
         self._code_event = threading.Event()
         self._phone_event = threading.Event()
         self._password_event = threading.Event()
+        self.silence_list = load_silence_list()
 
     def provide_phone(self, phone: str):
         self.phone = phone
@@ -141,6 +200,25 @@ class BotWorker(QThread):
     def provide_password(self, password: str):
         self.password = password
         self._password_event.set()
+
+    def add_silence(self, chat_id: int, reason: str = "手动添加"):
+        """添加到静默白名单"""
+        self.silence_list[str(chat_id)] = {
+            "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "reason": reason
+        }
+        save_silence_list(self.silence_list)
+        self.silence_updated.emit()
+
+    def remove_silence(self, chat_id: int):
+        """从静默白名单移除"""
+        self.silence_list.pop(str(chat_id), None)
+        save_silence_list(self.silence_list)
+        self.silence_updated.emit()
+
+    def is_silenced(self, chat_id: int) -> bool:
+        """检查是否在静默白名单中"""
+        return str(abs(chat_id)) in self.silence_list or str(chat_id) in self.silence_list
 
     def stop(self):
         self.running = False
@@ -177,7 +255,6 @@ class BotWorker(QThread):
             self.log(f"使用代理: {s['proxy_type']}://{s['proxy_host']}:{s['proxy_port']}")
 
         # 创建 Telegram 客户端
-        # 使用 exe 所在目录存放 session（兼容打包后的路径）
         if getattr(sys, 'frozen', False):
             app_dir = Path(sys.executable).parent
         else:
@@ -227,7 +304,6 @@ class BotWorker(QThread):
         # 登录
         await self.client.connect()
         if not await self.client.is_user_authorized():
-            # 需要登录
             self.login_required.emit()
             self._phone_event.wait()
             self._phone_event.clear()
@@ -269,72 +345,103 @@ class BotWorker(QThread):
             expire_hours=s["context_expire_hours"]
         )
 
-        # 消息聚合缓冲区：key = (chat_id, sender_id), value = {messages, timer_task, event, ...}
+        # 消息聚合缓冲区
         pending_messages = {}
+        # 正在处理中的 chat，防止重复触发
+        processing_chats = set()
         debounce_seconds = s.get("debounce_seconds", 10)
 
-        async def _process_buffered(chat_id, sender_id, sender_name):
+        async def _process_buffered(chat_id):
             """处理聚合后的消息"""
-            key = (chat_id, sender_id)
-            if key not in pending_messages:
+            if chat_id not in pending_messages:
                 return
 
-            buffer = pending_messages.pop(key)
-            msgs = buffer["messages"]  # list of (msg_text, has_photo, event)
+            # 标记正在处理
+            processing_chats.add(chat_id)
 
-            # 合并所有文本消息
+            buffer = pending_messages.pop(chat_id)
+            msgs = buffer["messages"]  # list of (msg_text, has_photo, event, sender_name)
+
+            # 合并所有文本消息，保留发送者信息
             combined_texts = []
-            photo_data = None  # 只取最后一张图片
             last_event = msgs[-1][2]
+            last_sender = msgs[-1][3]
 
-            for msg_text, has_photo, evt in msgs:
+            for msg_text, has_photo, evt, sname in msgs:
                 if msg_text:
                     combined_texts.append(msg_text)
                 if has_photo:
-                    last_event = evt  # 用有图片的那条 event
+                    last_event = evt
 
-            combined_text = " ".join(combined_texts)
+            combined_text = "\n".join(combined_texts)
             has_any_photo = any(m[1] for m in msgs)
 
-            self.log(f"聚合 {sender_name} 的 {len(msgs)} 条消息: {combined_text[:60]}")
+            self.log(f"聚合 {last_sender} 的 {len(msgs)} 条消息: {combined_text[:80]}")
+
+            # 持久化聊天记录
+            save_chat_log(chat_id, last_sender, "user", combined_text or "[图片]")
+
+            # 检查静默白名单
+            if self.is_silenced(chat_id):
+                self.log(f"群 {chat_id} 在静默名单中，跳过 AI 回复", "skip")
+                if combined_text:
+                    memory.add_message(chat_id, "user", f"[{last_sender}] {combined_text}")
+                processing_chats.discard(chat_id)
+                # 检查是否有新消息在处理期间到达
+                await _check_pending_after(chat_id)
+                return
 
             # 判断是否回复
             judge_text = combined_text if combined_text else "[客户发送了一张图片]"
-            should = await self._should_reply(ai_client, s, judge_text, sender_name)
+            should = await self._should_reply(ai_client, s, judge_text, last_sender)
             if not should:
                 self.log(f"跳过（判断为不需要回复）", "skip")
                 if combined_text:
-                    memory.add_message(chat_id, "user", f"[{sender_name}] {combined_text}")
+                    memory.add_message(chat_id, "user", f"[{last_sender}] {combined_text}")
+                processing_chats.discard(chat_id)
+                await _check_pending_after(chat_id)
                 return
 
             # 预警检测
             if combined_text:
-                need_alert = await self._check_alert(ai_client, s, combined_text, sender_name, chat_id)
+                need_alert = await self._check_alert(ai_client, s, combined_text, last_sender, chat_id)
                 if need_alert:
-                    await self._send_webhook_alert(s, sender_name, chat_id, combined_text)
-                    memory.clear_chat(chat_id)
-                    self.log(f"⚠️ 触发预警，已清除上下文，跳过自动回复，等待人工介入", "error")
+                    silence_reply = s.get("silence_auto_reply", "好的，请您稍等一下，我马上处理。")
+                    try:
+                        await last_event.reply(silence_reply)
+                        self.log(f"触发人工接入，已回复: {silence_reply}", "error")
+                        save_chat_log(chat_id, "系统", "assistant", silence_reply)
+                    except Exception as e:
+                        self.log(f"发送稍等回复失败: {e}", "error")
+
+                    self.add_silence(abs(chat_id), reason=f"预警触发: {combined_text[:50]}")
+                    self.log(f"⚠️ 已将群 {chat_id} 加入静默名单，等待人工介入", "error")
+
+                    await self._send_webhook_alert(s, last_sender, chat_id, combined_text)
+                    memory.add_message(chat_id, "user", f"[{last_sender}] {combined_text}")
+                    memory.add_message(chat_id, "assistant", silence_reply)
+                    processing_chats.discard(chat_id)
+                    await _check_pending_after(chat_id)
                     return
 
             # 处理图片
             content = combined_text
             if has_any_photo:
                 import base64
-                # 找最后一条有图片的消息
-                for msg_text, has_photo, evt in reversed(msgs):
+                for msg_text, has_photo, evt, sname in reversed(msgs):
                     if has_photo:
                         photo_bytes = await evt.message.download_media(bytes)
                         if photo_bytes:
                             b64 = base64.b64encode(photo_bytes).decode()
                             content = [
-                                {"type": "text", "text": f"[{sender_name}] {combined_text or '发送了一张图片，请帮我看看'}"},
+                                {"type": "text", "text": f"[{last_sender}] {combined_text or '发送了一张图片，请帮我看看'}"},
                                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
                             ]
                         else:
-                            content = f"[{sender_name}] {combined_text or '[图片无法下载]'}"
+                            content = f"[{last_sender}] {combined_text or '[图片无法下载]'}"
                         break
             else:
-                content = f"[{sender_name}] {combined_text}"
+                content = f"[{last_sender}] {combined_text}"
 
             memory.add_message(chat_id, "user", content)
             context = memory.get_context(chat_id)
@@ -348,20 +455,66 @@ class BotWorker(QThread):
                 reply = resp.choices[0].message.content.strip()
             except Exception as e:
                 self.log(f"AI 调用失败: {e}", "error")
+                processing_chats.discard(chat_id)
+                await _check_pending_after(chat_id)
                 return
 
-            # 延迟回复
-            delay = random.uniform(s["delay_min"], s["delay_max"])
-            self.log(f"等待 {delay:.1f}s 后回复...")
-            await asyncio.sleep(delay)
+            # 分条回复逻辑
+            if s.get("split_reply", True) and "|||" in reply:
+                parts = [p.strip() for p in reply.split("|||") if p.strip()]
+            else:
+                # 如果 AI 没用 |||，按句号/换行自动拆分（超过50字的段落才拆）
+                if s.get("split_reply", True) and len(reply) > 80:
+                    parts = [p.strip() for p in reply.split("\n") if p.strip()]
+                    if len(parts) == 1:
+                        parts = [reply]
+                else:
+                    parts = [reply]
 
-            # 发送（回复最后一条消息）
-            try:
-                await last_event.reply(reply)
-                self.log(f"回复: {reply[:80]}{'...' if len(reply) > 80 else ''}", "reply")
-                memory.add_message(chat_id, "assistant", reply)
-            except Exception as e:
-                self.log(f"发送失败: {e}", "error")
+            # 发送回复（分条）
+            full_reply_text = ""
+            for i, part in enumerate(parts):
+                if i == 0:
+                    delay = random.uniform(s["delay_min"], s["delay_max"])
+                else:
+                    delay = random.uniform(
+                        s.get("split_delay_min", 2),
+                        s.get("split_delay_max", 5)
+                    )
+                self.log(f"等待 {delay:.1f}s 后发送第 {i+1}/{len(parts)} 条...")
+                await asyncio.sleep(delay)
+
+                try:
+                    if i == 0:
+                        await last_event.reply(part)
+                    else:
+                        await self.client.send_message(chat_id, part)
+                    self.log(f"回复({i+1}/{len(parts)}): {part[:60]}{'...' if len(part) > 60 else ''}", "reply")
+                    full_reply_text += part + "\n"
+                except Exception as e:
+                    self.log(f"发送第 {i+1} 条失败: {e}", "error")
+                    break
+
+            # 记录完整回复
+            if full_reply_text:
+                memory.add_message(chat_id, "assistant", full_reply_text.strip())
+                save_chat_log(chat_id, "AI", "assistant", full_reply_text.strip())
+
+            # 处理完毕，解除锁定
+            processing_chats.discard(chat_id)
+            # 检查处理期间是否有新消息到达
+            await _check_pending_after(chat_id)
+
+        async def _check_pending_after(chat_id):
+            """处理完成后，如果有新消息在处理期间积累，立即处理"""
+            if chat_id in pending_messages:
+                # 取消旧定时器
+                if "timer_task" in pending_messages[chat_id]:
+                    pending_messages[chat_id]["timer_task"].cancel()
+                # 短暂等待看是否还有更多消息
+                await asyncio.sleep(3)
+                if chat_id in pending_messages:
+                    await _process_buffered(chat_id)
 
         # 消息处理器
         @self.client.on(events.NewMessage())
@@ -381,7 +534,6 @@ class BotWorker(QThread):
             last = getattr(sender, "last_name", "") or ""
             if last:
                 sender_name += f" {last}"
-            sender_id = getattr(sender, "id", 0)
 
             msg_text = event.message.message or ""
             has_photo = event.message.photo is not None
@@ -391,24 +543,28 @@ class BotWorker(QThread):
 
             self.log(f"收到 {sender_name}: {msg_text[:60]}{'[图片]' if has_photo else ''}")
 
-            # 消息聚合：缓存消息并重置计时器
-            key = (chat_id, sender_id)
-            if key in pending_messages:
-                # 取消之前的定时器
-                pending_messages[key]["timer_task"].cancel()
-                pending_messages[key]["messages"].append((msg_text, has_photo, event))
+            # 按 chat_id 聚合（不区分 sender，群里连续消息统一处理）
+            if chat_id in pending_messages:
+                # 取消之前的定时器，追加消息
+                if "timer_task" in pending_messages[chat_id]:
+                    pending_messages[chat_id]["timer_task"].cancel()
+                pending_messages[chat_id]["messages"].append((msg_text, has_photo, event, sender_name))
             else:
-                pending_messages[key] = {
-                    "messages": [(msg_text, has_photo, event)],
-                    "sender_name": sender_name,
+                pending_messages[chat_id] = {
+                    "messages": [(msg_text, has_photo, event, sender_name)],
                 }
+
+            # 如果当前 chat 正在处理中，不启动新定时器，消息会在处理完后被 _check_pending_after 捡起
+            if chat_id in processing_chats:
+                self.log(f"群 {chat_id} 正在处理中，消息已缓存等待", "skip")
+                return
 
             # 设置新的定时器
             async def debounce_fire():
                 await asyncio.sleep(debounce_seconds)
-                await _process_buffered(chat_id, sender_id, sender_name)
+                await _process_buffered(chat_id)
 
-            pending_messages[key]["timer_task"] = asyncio.create_task(debounce_fire())
+            pending_messages[chat_id]["timer_task"] = asyncio.create_task(debounce_fire())
 
         self.log(f"开始监听（延迟 {s['delay_min']}-{s['delay_max']}s）", "success")
         await self.client.run_until_disconnected()
@@ -467,7 +623,7 @@ class BotWorker(QThread):
                 max_tokens=10, temperature=0
             )
             return "是" in resp.choices[0].message.content.strip()
-        except:
+        except Exception:
             return True
 
     async def _check_alert(self, ai_client, settings, text, sender_name, chat_id) -> bool:
@@ -490,7 +646,7 @@ class BotWorker(QThread):
                 max_tokens=10, temperature=0
             )
             return "是" in resp.choices[0].message.content.strip()
-        except:
+        except Exception:
             return False
 
     async def _send_webhook_alert(self, settings, sender_name, chat_id, msg_text):
@@ -503,7 +659,7 @@ class BotWorker(QThread):
         payload = {
             "msgtype": "text",
             "text": {
-                "content": f"⚠️ 客户预警\n\n发送者: {sender_name}\n群/对话ID: {chat_id}\n消息内容: {msg_text[:200]}\n\n请尽快手动介入处理。"
+                "content": f"⚠️ 客户预警\n\n发送者: {sender_name}\n群/对话ID: {chat_id}\n消息内容: {msg_text[:200]}\n\n已自动回复\"请稍等\"并加入静默名单。\n请尽快手动介入处理，处理完毕后在 GUI 中移除静默名单恢复 AI 回复。"
             }
         }
         try:
@@ -525,14 +681,189 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
         self.worker = None
         self.init_ui()
+        self._apply_style()
+
+    def _apply_style(self):
+        """应用浅色主题样式"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #f8f9fa;
+            }
+            QWidget {
+                font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+                font-size: 13px;
+                color: #2c3e50;
+            }
+            QTabWidget::pane {
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                background-color: #ffffff;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background-color: #e9ecef;
+                border: 1px solid #dee2e6;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 8px 18px;
+                margin-right: 3px;
+                color: #495057;
+            }
+            QTabBar::tab:selected {
+                background-color: #ffffff;
+                border-bottom: 2px solid #4a90d9;
+                color: #2c3e50;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #f1f3f5;
+            }
+            QGroupBox {
+                font-weight: bold;
+                font-size: 13px;
+                color: #34495e;
+                border: 1px solid #e0e4e8;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 16px 12px 12px 12px;
+                background-color: #ffffff;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+                padding: 2px 10px;
+                color: #2c3e50;
+            }
+            QLineEdit, QComboBox {
+                border: 1px solid #ced4da;
+                border-radius: 5px;
+                padding: 6px 10px;
+                background-color: #ffffff;
+                color: #2c3e50;
+                selection-background-color: #4a90d9;
+            }
+            QLineEdit:focus, QComboBox:focus {
+                border: 1.5px solid #4a90d9;
+                background-color: #f8fbff;
+            }
+            QSpinBox {
+                padding: 4px 6px;
+                color: #2c3e50;
+                background-color: #ffffff;
+                selection-background-color: #4a90d9;
+            }
+            QTextEdit {
+                border: 1px solid #ced4da;
+                border-radius: 5px;
+                padding: 6px;
+                background-color: #ffffff;
+                color: #2c3e50;
+                selection-background-color: #4a90d9;
+            }
+            QTextEdit:focus {
+                border: 1.5px solid #4a90d9;
+            }
+            QPushButton {
+                background-color: #4a90d9;
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 20px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #3a7bc8;
+            }
+            QPushButton:pressed {
+                background-color: #2e6bb0;
+            }
+            QPushButton:disabled {
+                background-color: #adb5bd;
+                color: #e9ecef;
+            }
+            QPushButton#stopBtn {
+                background-color: #e74c3c;
+            }
+            QPushButton#stopBtn:hover {
+                background-color: #c0392b;
+            }
+            QPushButton#stopBtn:disabled {
+                background-color: #adb5bd;
+            }
+            QCheckBox {
+                spacing: 8px;
+                color: #2c3e50;
+            }
+            QCheckBox::indicator {
+                width: 18px;
+                height: 18px;
+                border-radius: 4px;
+                border: 1.5px solid #ced4da;
+                background-color: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #4a90d9;
+                border-color: #4a90d9;
+            }
+            QListWidget {
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                background-color: #ffffff;
+                padding: 4px;
+                outline: none;
+            }
+            QListWidget::item {
+                padding: 8px 10px;
+                border-radius: 4px;
+                margin: 2px 0;
+            }
+            QListWidget::item:selected {
+                background-color: #e3f0fc;
+                color: #2c3e50;
+            }
+            QListWidget::item:hover:!selected {
+                background-color: #f1f3f5;
+            }
+            QLabel {
+                color: #495057;
+            }
+            QLabel#statusLabel {
+                font-size: 13px;
+                font-weight: bold;
+                color: #2c3e50;
+            }
+            QFormLayout {
+                margin: 8px;
+            }
+            QScrollBar:vertical {
+                background-color: #f1f3f5;
+                width: 10px;
+                border-radius: 5px;
+            }
+            QScrollBar::handle:vertical {
+                background-color: #ced4da;
+                border-radius: 5px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background-color: #adb5bd;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+        """)
 
     def init_ui(self):
         self.setWindowTitle("博思云 Telegram 自动回复系统")
-        self.setMinimumSize(700, 550)
+        self.setMinimumSize(750, 600)
 
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
 
         # 标签页
         tabs = QTabWidget()
@@ -554,32 +885,95 @@ class MainWindow(QMainWindow):
         rules_tab = self._create_rules_tab()
         tabs.addTab(rules_tab, "回复规则")
 
+        # 静默管理页
+        silence_tab = self._create_silence_tab()
+        tabs.addTab(silence_tab, "静默管理")
+
         # 底部控制栏
-        control_layout = QHBoxLayout()
-        self.start_btn = QPushButton("▶ 启动")
-        self.start_btn.setFixedHeight(36)
+        control_bar = QWidget()
+        control_bar.setObjectName("controlBar")
+        control_bar.setStyleSheet("""
+            QWidget#controlBar {
+                background-color: #ffffff;
+                border: 1px solid #e0e4e8;
+                border-radius: 8px;
+            }
+            QWidget#controlBar QPushButton#startBtn {
+                background-color: #4a90d9;
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 20px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QWidget#controlBar QPushButton#startBtn:hover {
+                background-color: #3a7bc8;
+            }
+            QWidget#controlBar QPushButton#startBtn:disabled {
+                background-color: #adb5bd;
+                color: #e9ecef;
+            }
+            QWidget#controlBar QPushButton#stopBtn {
+                background-color: #e74c3c;
+                color: #ffffff;
+                border: none;
+                border-radius: 6px;
+                padding: 8px 20px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QWidget#controlBar QPushButton#stopBtn:hover {
+                background-color: #c0392b;
+            }
+            QWidget#controlBar QPushButton#stopBtn:disabled {
+                background-color: #adb5bd;
+                color: #e9ecef;
+            }
+        """)
+        control_layout = QHBoxLayout(control_bar)
+        control_layout.setContentsMargins(12, 8, 12, 8)
+
+        self.start_btn = QPushButton("▶  启动")
+        self.start_btn.setObjectName("startBtn")
+        self.start_btn.setFixedHeight(38)
+        self.start_btn.setFixedWidth(120)
         self.start_btn.clicked.connect(self.start_bot)
         control_layout.addWidget(self.start_btn)
 
-        self.stop_btn = QPushButton("■ 停止")
-        self.stop_btn.setFixedHeight(36)
+        self.stop_btn = QPushButton("■  停止")
+        self.stop_btn.setObjectName("stopBtn")
+        self.stop_btn.setFixedHeight(38)
+        self.stop_btn.setFixedWidth(120)
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self.stop_bot)
         control_layout.addWidget(self.stop_btn)
 
+        control_layout.addStretch()
+
         self.status_label = QLabel("状态: 未启动")
+        self.status_label.setObjectName("statusLabel")
         self.status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         control_layout.addWidget(self.status_label)
 
-        layout.addLayout(control_layout)
+        layout.addWidget(control_bar)
 
     def _create_config_tab(self) -> QWidget:
+        # 外层用 QScrollArea 包裹，防止缩小时内容重叠
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
+
         widget = QWidget()
         layout = QVBoxLayout(widget)
+        layout.setSpacing(10)
 
         # Telegram 配置
         tg_group = QGroupBox("Telegram 配置")
         tg_form = QFormLayout(tg_group)
+        tg_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        tg_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.api_id_input = QLineEdit(str(self.settings["telegram_api_id"]))
         tg_form.addRow("API ID:", self.api_id_input)
@@ -595,6 +989,8 @@ class MainWindow(QMainWindow):
         # AI 配置
         ai_group = QGroupBox("AI 配置")
         ai_form = QFormLayout(ai_group)
+        ai_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        ai_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.base_url_input = QLineEdit(self.settings["ai_base_url"])
         ai_form.addRow("Base URL:", self.base_url_input)
@@ -611,68 +1007,111 @@ class MainWindow(QMainWindow):
         # 回复配置
         reply_group = QGroupBox("回复配置")
         reply_form = QFormLayout(reply_group)
+        reply_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        reply_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
+        reply_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         delay_layout = QHBoxLayout()
+        delay_layout.setSpacing(6)
         self.delay_min_input = QSpinBox()
         self.delay_min_input.setRange(1, 60)
         self.delay_min_input.setValue(self.settings["delay_min"])
+        self.delay_min_input.setMinimumWidth(70)
         delay_layout.addWidget(self.delay_min_input)
-        delay_layout.addWidget(QLabel("-"))
+        delay_layout.addWidget(QLabel("~"))
         self.delay_max_input = QSpinBox()
         self.delay_max_input.setRange(1, 120)
         self.delay_max_input.setValue(self.settings["delay_max"])
+        self.delay_max_input.setMinimumWidth(70)
         delay_layout.addWidget(self.delay_max_input)
         delay_layout.addWidget(QLabel("秒"))
-        reply_form.addRow("回复延迟:", delay_layout)
+        delay_layout.addStretch()
+        reply_form.addRow("首条回复延迟:", delay_layout)
 
         self.context_input = QSpinBox()
         self.context_input.setRange(5, 50)
         self.context_input.setValue(self.settings["context_messages"])
+        self.context_input.setMinimumWidth(70)
         reply_form.addRow("上下文消息数:", self.context_input)
 
         self.debounce_input = QSpinBox()
         self.debounce_input.setRange(3, 60)
         self.debounce_input.setValue(self.settings.get("debounce_seconds", 10))
         self.debounce_input.setSuffix(" 秒")
+        self.debounce_input.setMinimumWidth(70)
         reply_form.addRow("消息聚合等待:", self.debounce_input)
 
+        # 分条回复配置
+        self.split_check = QCheckBox("启用分条回复")
+        self.split_check.setChecked(self.settings.get("split_reply", True))
+        reply_form.addRow(self.split_check)
+
+        split_delay_layout = QHBoxLayout()
+        split_delay_layout.setSpacing(6)
+        self.split_delay_min_input = QSpinBox()
+        self.split_delay_min_input.setRange(1, 30)
+        self.split_delay_min_input.setValue(self.settings.get("split_delay_min", 2))
+        self.split_delay_min_input.setMinimumWidth(70)
+        split_delay_layout.addWidget(self.split_delay_min_input)
+        split_delay_layout.addWidget(QLabel("~"))
+        self.split_delay_max_input = QSpinBox()
+        self.split_delay_max_input.setRange(1, 60)
+        self.split_delay_max_input.setValue(self.settings.get("split_delay_max", 5))
+        self.split_delay_max_input.setMinimumWidth(70)
+        split_delay_layout.addWidget(self.split_delay_max_input)
+        split_delay_layout.addWidget(QLabel("秒"))
+        split_delay_layout.addStretch()
+        reply_form.addRow("分条间隔:", split_delay_layout)
+
         self.webhook_input = QLineEdit(self.settings.get("alert_webhook_url", ""))
-        self.webhook_input.setPlaceholderText("企业微信 webhook 地址（留空则不推送预警）")
+        self.webhook_input.setPlaceholderText("企业微信 webhook 地址")
         reply_form.addRow("预警 Webhook:", self.webhook_input)
+
+        self.silence_reply_input = QLineEdit(self.settings.get("silence_auto_reply", "好的，请您稍等一下，我马上处理。"))
+        self.silence_reply_input.setPlaceholderText("触发人工接入时自动回复的内容")
+        reply_form.addRow("人工接入回复:", self.silence_reply_input)
 
         layout.addWidget(reply_group)
 
         # 代理配置
         proxy_group = QGroupBox("代理配置")
         proxy_form = QFormLayout(proxy_group)
+        proxy_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        proxy_form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.proxy_check = QCheckBox("启用代理")
         self.proxy_check.setChecked(self.settings.get("proxy_enabled", False))
         proxy_form.addRow(self.proxy_check)
 
         proxy_detail = QHBoxLayout()
+        proxy_detail.setSpacing(6)
         self.proxy_type_combo = QComboBox()
         self.proxy_type_combo.addItems(["socks5", "http"])
         self.proxy_type_combo.setCurrentText(self.settings.get("proxy_type", "socks5"))
+        self.proxy_type_combo.setMinimumWidth(80)
         proxy_detail.addWidget(self.proxy_type_combo)
         self.proxy_host_input = QLineEdit(self.settings.get("proxy_host", "127.0.0.1"))
-        self.proxy_host_input.setFixedWidth(120)
+        self.proxy_host_input.setMinimumWidth(100)
         proxy_detail.addWidget(self.proxy_host_input)
         self.proxy_port_input = QSpinBox()
         self.proxy_port_input.setRange(1, 65535)
         self.proxy_port_input.setValue(self.settings.get("proxy_port", 7890))
+        self.proxy_port_input.setMinimumWidth(80)
         proxy_detail.addWidget(self.proxy_port_input)
+        proxy_detail.addStretch()
         proxy_form.addRow("代理地址:", proxy_detail)
 
         layout.addWidget(proxy_group)
 
         # 保存按钮
         save_btn = QPushButton("保存配置")
+        save_btn.setFixedWidth(140)
         save_btn.clicked.connect(self.save_config)
-        layout.addWidget(save_btn)
+        layout.addWidget(save_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
         layout.addStretch()
-        return widget
+        scroll.setWidget(widget)
+        return scroll
 
     def _create_log_tab(self) -> QWidget:
         widget = QWidget()
@@ -680,12 +1119,30 @@ class MainWindow(QMainWindow):
 
         self.log_text = QTextEdit()
         self.log_text.setReadOnly(True)
-        self.log_text.setFont(QFont("Consolas", 9))
+        self.log_text.setFont(QFont("Consolas", 10))
+        self.log_text.setStyleSheet("""
+            QTextEdit {
+                background-color: #fafbfc;
+                border: 1px solid #e0e4e8;
+                border-radius: 6px;
+                padding: 10px;
+                line-height: 1.5;
+            }
+        """)
         layout.addWidget(self.log_text)
 
         clear_btn = QPushButton("清空日志")
+        clear_btn.setFixedWidth(120)
+        clear_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #6c757d;
+            }
+            QPushButton:hover {
+                background-color: #5a6268;
+            }
+        """)
         clear_btn.clicked.connect(self.log_text.clear)
-        layout.addWidget(clear_btn)
+        layout.addWidget(clear_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
         return widget
 
@@ -693,20 +1150,41 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
-        layout.addWidget(QLabel("系统提示词（定义 AI 的回复风格和角色）:"))
+        header = QLabel("系统提示词（定义 AI 的回复风格和角色）:")
+        header.setStyleSheet("font-weight: bold; color: #34495e; padding: 4px 0;")
+        layout.addWidget(header)
+
         self.prompt_edit = QTextEdit()
         self.prompt_edit.setPlainText(self.settings["system_prompt"])
         self.prompt_edit.setFont(QFont("Microsoft YaHei", 10))
+        self.prompt_edit.setStyleSheet("""
+            QTextEdit {
+                background-color: #ffffff;
+                border: 1px solid #dee2e6;
+                border-radius: 6px;
+                padding: 10px;
+                line-height: 1.6;
+            }
+            QTextEdit:focus {
+                border: 1.5px solid #4a90d9;
+            }
+        """)
         layout.addWidget(self.prompt_edit)
 
         save_prompt_btn = QPushButton("保存提示词")
+        save_prompt_btn.setFixedWidth(140)
         save_prompt_btn.clicked.connect(self.save_config)
-        layout.addWidget(save_prompt_btn)
+        layout.addWidget(save_prompt_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
         return widget
 
     def _create_rules_tab(self) -> QWidget:
         """创建回复规则配置页"""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setStyleSheet("QScrollArea { background-color: transparent; border: none; }")
+
         widget = QWidget()
         layout = QVBoxLayout(widget)
 
@@ -753,15 +1231,120 @@ class MainWindow(QMainWindow):
 
         # 保存按钮
         save_rules_btn = QPushButton("保存规则")
+        save_rules_btn.setFixedWidth(140)
         save_rules_btn.clicked.connect(self.save_config)
-        layout.addWidget(save_rules_btn)
+        layout.addWidget(save_rules_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        layout.addStretch()
+        scroll.setWidget(widget)
+        return scroll
+
+    def _create_silence_tab(self) -> QWidget:
+        """创建静默管理页"""
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+
+        hint_label = QLabel("静默白名单中的群聊将暂停 AI 自动回复，由人工接管。\n"
+                            "触发预警时会自动加入，处理完毕后手动移除即可恢复 AI 回复。")
+        hint_label.setStyleSheet("color: #6c757d; padding: 6px 0; line-height: 1.6;")
+        layout.addWidget(hint_label)
+
+        # 静默列表
+        self.silence_list_widget = QListWidget()
+        self.silence_list_widget.setFont(QFont("Microsoft YaHei", 10))
+        self._refresh_silence_list()
+        layout.addWidget(self.silence_list_widget)
+
+        # 操作按钮
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        add_btn = QPushButton("+ 手动添加")
+        add_btn.setStyleSheet("""
+            QPushButton { background-color: #28a745; }
+            QPushButton:hover { background-color: #218838; }
+        """)
+        add_btn.clicked.connect(self._add_silence_manual)
+        btn_layout.addWidget(add_btn)
+
+        remove_btn = QPushButton("移除选中（恢复 AI）")
+        remove_btn.setStyleSheet("""
+            QPushButton { background-color: #e74c3c; }
+            QPushButton:hover { background-color: #c0392b; }
+        """)
+        remove_btn.clicked.connect(self._remove_silence)
+        btn_layout.addWidget(remove_btn)
+
+        refresh_btn = QPushButton("刷新列表")
+        refresh_btn.setStyleSheet("""
+            QPushButton { background-color: #6c757d; }
+            QPushButton:hover { background-color: #5a6268; }
+        """)
+        refresh_btn.clicked.connect(self._refresh_silence_list)
+        btn_layout.addWidget(refresh_btn)
+
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
 
         layout.addStretch()
         return widget
 
+    def _refresh_silence_list(self):
+        """刷新静默列表显示"""
+        self.silence_list_widget.clear()
+        silence_data = load_silence_list()
+        if not silence_data:
+            self.silence_list_widget.addItem("（当前无静默群聊）")
+            return
+        for chat_id, info in silence_data.items():
+            added_at = info.get("added_at", "未知")
+            reason = info.get("reason", "")
+            item_text = f"群ID: {chat_id}  |  添加时间: {added_at}  |  原因: {reason}"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.ItemDataRole.UserRole, chat_id)
+            self.silence_list_widget.addItem(item)
+
+    def _add_silence_manual(self):
+        """手动添加静默群聊"""
+        chat_id, ok = QInputDialog.getText(self, "添加静默群聊", "请输入群/对话 ID:")
+        if ok and chat_id.strip():
+            try:
+                cid = chat_id.strip()
+                silence_data = load_silence_list()
+                silence_data[cid] = {
+                    "added_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "reason": "手动添加"
+                }
+                save_silence_list(silence_data)
+                # 同步到 worker
+                if self.worker:
+                    self.worker.silence_list = silence_data
+                self._refresh_silence_list()
+                self.append_log(f"[静默] 已添加群 {cid} 到静默名单", "info")
+            except Exception as e:
+                QMessageBox.warning(self, "错误", f"添加失败: {e}")
+
+    def _remove_silence(self):
+        """移除选中的静默群聊"""
+        current = self.silence_list_widget.currentItem()
+        if not current:
+            QMessageBox.information(self, "提示", "请先选中要移除的群聊")
+            return
+        chat_id = current.data(Qt.ItemDataRole.UserRole)
+        if not chat_id:
+            return
+
+        silence_data = load_silence_list()
+        silence_data.pop(str(chat_id), None)
+        save_silence_list(silence_data)
+        # 同步到 worker
+        if self.worker:
+            self.worker.silence_list = silence_data
+        self._refresh_silence_list()
+        self.append_log(f"[静默] 已移除群 {chat_id}，AI 回复已恢复", "success")
+
     def save_config(self):
         """保存所有配置"""
-        # 解析回复规则关键词
         skip_text = self.skip_keywords_edit.toPlainText() if hasattr(self, 'skip_keywords_edit') else ""
         skip_keywords = [line.strip() for line in skip_text.split("\n") if line.strip()]
 
@@ -784,6 +1367,10 @@ class MainWindow(QMainWindow):
             "context_expire_hours": 72,
             "debounce_seconds": self.debounce_input.value(),
             "alert_webhook_url": self.webhook_input.text(),
+            "silence_auto_reply": self.silence_reply_input.text(),
+            "split_reply": self.split_check.isChecked(),
+            "split_delay_min": self.split_delay_min_input.value(),
+            "split_delay_max": self.split_delay_max_input.value(),
             "proxy_enabled": self.proxy_check.isChecked(),
             "proxy_type": self.proxy_type_combo.currentText(),
             "proxy_host": self.proxy_host_input.text(),
@@ -814,6 +1401,7 @@ class MainWindow(QMainWindow):
         self.worker.login_required.connect(self.on_login_required)
         self.worker.code_required.connect(self.on_code_required)
         self.worker.password_required.connect(self.on_password_required)
+        self.worker.silence_updated.connect(self._refresh_silence_list)
         self.worker.start()
 
     def stop_bot(self):
@@ -862,15 +1450,14 @@ class MainWindow(QMainWindow):
     def append_log(self, msg: str, level: str = "info"):
         """追加日志到日志窗口"""
         color_map = {
-            "info": "#333333",
-            "success": "#2e7d32",
-            "error": "#c62828",
-            "reply": "#1565c0",
-            "skip": "#757575",
+            "info": "#2c3e50",
+            "success": "#27ae60",
+            "error": "#e74c3c",
+            "reply": "#2980b9",
+            "skip": "#95a5a6",
         }
-        color = color_map.get(level, "#333333")
-        self.log_text.append(f'<span style="color:{color}">{msg}</span>')
-        # 自动滚动到底部
+        color = color_map.get(level, "#2c3e50")
+        self.log_text.append(f'<span style="color:{color}; font-size:10pt;">{msg}</span>')
         cursor = self.log_text.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.log_text.setTextCursor(cursor)
@@ -887,11 +1474,24 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # 单实例检测：防止重复打开导致 database locked
+    # 设置浅色调色板
+    from PyQt6.QtGui import QPalette
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor("#f8f9fa"))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor("#2c3e50"))
+    palette.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor("#f1f3f5"))
+    palette.setColor(QPalette.ColorRole.Text, QColor("#2c3e50"))
+    palette.setColor(QPalette.ColorRole.Button, QColor("#e9ecef"))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor("#2c3e50"))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor("#4a90d9"))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    app.setPalette(palette)
+
+    # 单实例检测
     import tempfile
     lock_file = Path(tempfile.gettempdir()) / "bosicloud_autoreply.lock"
     try:
-        # 尝试独占打开锁文件
         lock_fd = open(lock_file, 'w')
         import msvcrt
         msvcrt.locking(lock_fd.fileno(), msvcrt.LK_NBLCK, 1)
