@@ -10,6 +10,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QAction, QPixmap, QPainter, QColor, QIcon, QPalette
 
+import sys
+from pathlib import Path
+
 from core.config import load_settings, save_settings
 from core.bot_worker import BotWorker
 from core.updater import CURRENT_VERSION, check_update, UpdateWorker
