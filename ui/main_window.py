@@ -12,6 +12,7 @@ from PyQt6.QtGui import QAction, QPixmap, QPainter, QColor, QIcon, QPalette
 
 from core.config import load_settings, save_settings
 from core.bot_worker import BotWorker
+from core.updater import CURRENT_VERSION, check_update, UpdateWorker
 from ui.tabs import ConfigTab, LogTab, PromptTab, RulesTab, SilenceTab, StatsTab
 from ui.style import LIGHT_THEME
 
@@ -125,6 +126,21 @@ class MainWindow(QMainWindow):
         self.status_label = QLabel("状态: 未启动")
         self.status_label.setStyleSheet("font-weight: bold;")
         ctrl_layout.addWidget(self.status_label)
+
+        # 版本号 + 检查更新
+        ver_label = QLabel(f"v{CURRENT_VERSION}")
+        ver_label.setStyleSheet("color: #95a5a6; font-size: 11px; margin-left: 12px;")
+        ctrl_layout.addWidget(ver_label)
+
+        update_btn = QPushButton("检查更新")
+        update_btn.setFixedSize(90, 30)
+        update_btn.setStyleSheet("""
+            QPushButton { background-color: #6c757d; font-size: 11px; padding: 4px 10px; }
+            QPushButton:hover { background-color: #5a6268; }
+        """)
+        update_btn.clicked.connect(self._check_update)
+        ctrl_layout.addWidget(update_btn)
+
         layout.addWidget(control)
 
     def _init_tray(self):
@@ -278,3 +294,101 @@ class MainWindow(QMainWindow):
                 self.worker.stop()
                 self.worker.wait(3000)
             event.accept()
+
+    # ---- 更新相关 ----
+
+    def _check_update(self):
+        """检查更新"""
+        self.log_tab.append("[检查更新中...]", "info")
+        proxy_settings = {
+            "enabled": self.settings.get("proxy_enabled", False),
+            "type": self.settings.get("proxy_type", "http"),
+            "host": self.settings.get("proxy_host", "127.0.0.1"),
+            "port": self.settings.get("proxy_port", 7890),
+        }
+
+        from core.updater import check_update
+        import threading
+
+        def _do_check():
+            try:
+                info = check_update(proxy_settings)
+            except Exception as e:
+                info = {"error": str(e)}
+            # 用 invokeMethod 安全回到主线程
+            self._update_result = info
+            QTimer.singleShot(0, self._handle_update_result)
+
+        t = threading.Thread(target=_do_check, daemon=True)
+        t.start()
+
+    def _handle_update_result(self):
+        """在主线程处理更新检查结果"""
+        info = getattr(self, '_update_result', None)
+        if info is None:
+            self.log_tab.append("[已是最新版本]", "success")
+        elif isinstance(info, dict) and "error" in info:
+            self.log_tab.append(f"[检查更新失败] {info['error']}", "error")
+        elif isinstance(info, dict) and "version" in info:
+            self._on_update_available(info)
+        else:
+            self.log_tab.append("[已是最新版本]", "success")
+
+    def _on_update_available(self, info: dict):
+        """发现新版本"""
+        version = info["version"]
+        body = info.get("body", "")
+        msg = f"发现新版本 {version}\n\n{body[:200]}\n\n是否立即更新？"
+        reply = QMessageBox.question(self, "检查更新", msg,
+                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self._start_update(info["download_url"])
+
+    def _start_update(self, url: str):
+        """开始下载更新"""
+        self.log_tab.append("[开始下载更新...]", "info")
+        self._update_worker = UpdateWorker(url)
+        self._update_worker.progress.connect(
+            lambda p: self.log_tab.append(f"[下载进度: {p}%]", "info") if p % 20 == 0 else None
+        )
+        self._update_worker.finished.connect(self._on_update_finished)
+        self._update_worker.start()
+
+    def _on_update_finished(self, success: bool, msg: str):
+        """更新完成"""
+        if success:
+            self.log_tab.append(f"[更新成功] {msg}", "success")
+            reply = QMessageBox.information(
+                self, "更新完成",
+                "更新已下载完成，需要重启程序以应用新版本。\n\n立即重启？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._restart_app()
+        else:
+            self.log_tab.append(f"[更新失败] {msg}", "error")
+            QMessageBox.warning(self, "更新失败", msg)
+
+    def _restart_app(self):
+        """重启应用（如果有更新脚本则执行它）"""
+        import subprocess
+        from core.config import APP_DIR
+
+        update_bat = APP_DIR / "_update.bat"
+        if getattr(sys, 'frozen', False):
+            if update_bat.exists():
+                # 有待替换的文件，运行 bat 脚本（它会等进程退出后替换并重启）
+                subprocess.Popen(
+                    ["cmd", "/c", str(update_bat)],
+                    cwd=str(APP_DIR),
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+            else:
+                # 直接重启
+                subprocess.Popen([sys.executable], cwd=str(APP_DIR))
+        else:
+            subprocess.Popen([sys.executable, "gui_app.py"],
+                           cwd=str(Path(__file__).parent.parent))
+
+        from PyQt6.QtWidgets import QApplication
+        QApplication.quit()
