@@ -30,7 +30,7 @@ RUN_LOG_DIR = APP_DIR / "run_logs"
 DEFAULT_SETTINGS: dict[str, Any] = {
     "telegram_api_id": "2040",
     "telegram_api_hash": "b18441a1ff607e10a989891a5462e627",
-    "telegram_folder": "客户",
+    "telegram_folders": ["客户"],
     "ai_base_url": "https://unifiedapi.cloud/v1",
     "ai_api_key": "",
     "ai_model": "claude-opus-4-6",

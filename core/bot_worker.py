@@ -206,8 +206,19 @@ class BotWorker(QThread):
         self.log(f"已登录: {me.first_name} ({me.phone})", "success")
         self.status_signal.emit("running")
 
-        # 加载文件夹 + 群名映射
-        self._monitored_chats = await self._load_folder(s["telegram_folder"])
+        # 加载文件夹 + 群名映射（支持多个文件夹）
+        folders = s.get("telegram_folders", [])
+        # 兼容旧配置（单个字符串）
+        if isinstance(folders, str):
+            folders = [folders]
+        if not folders and s.get("telegram_folder"):
+            folders = [s["telegram_folder"]]
+
+        self._monitored_chats = set()
+        for folder in folders:
+            if folder.strip():
+                ids = await self._load_folder(folder.strip())
+                self._monitored_chats.update(ids)
         await self._load_chat_names()
 
         # 初始化服务

@@ -45,7 +45,14 @@ class ConfigTab(QScrollArea):
         tg_form.addRow("API ID:", self.api_id)
         self.api_hash = QLineEdit(settings["telegram_api_hash"])
         tg_form.addRow("API Hash:", self.api_hash)
-        self.folder = QLineEdit(settings["telegram_folder"])
+        # 多文件夹支持：逗号分隔
+        folders = settings.get("telegram_folders", [])
+        if isinstance(folders, str):
+            folders = [folders]
+        if not folders and settings.get("telegram_folder"):
+            folders = [settings["telegram_folder"]]
+        self.folder = QLineEdit(", ".join(folders))
+        self.folder.setPlaceholderText("多个文件夹用逗号分隔，如：客户, VIP客户")
         tg_form.addRow("监听文件夹:", self.folder)
         layout.addWidget(tg_group)
 
@@ -159,7 +166,7 @@ class ConfigTab(QScrollArea):
         return {
             "telegram_api_id": self.api_id.text(),
             "telegram_api_hash": self.api_hash.text(),
-            "telegram_folder": self.folder.text(),
+            "telegram_folders": [f.strip() for f in self.folder.text().split(",") if f.strip()],
             "ai_base_url": self.base_url.text(),
             "ai_api_key": self.api_key.text(),
             "ai_model": self.model.text(),
