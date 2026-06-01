@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 from PyQt6.QtCore import QThread, pyqtSignal
 
 # 当前版本号（每次发版时更新这里）
-CURRENT_VERSION = "2.0.2"
+CURRENT_VERSION = "2.0.3"
 
 # GitHub 仓库信息
 GITHUB_OWNER = "TanZiPeng"
