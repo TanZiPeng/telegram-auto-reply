@@ -1,9 +1,12 @@
 @echo off
-echo 正在打包 博思云 Telegram 自动回复系统...
-pyinstaller --noconfirm --onedir --windowed ^
+echo 正在打包 博思云 Telegram 自动回复系统 v2.0...
+.\venv\Scripts\pyinstaller --noconfirm --onedir --windowed ^
     --name "BosiCloud-AutoReply" ^
+    --icon "logo.ico" ^
+    --add-data "core;core" ^
+    --add-data "ui;ui" ^
     --add-data "memory.py;." ^
-    --add-data "ai_client.py;." ^
+    --add-data "logo.ico;." ^
     --hidden-import "socks" ^
     --hidden-import "sockshandler" ^
     --hidden-import "PySocks" ^
