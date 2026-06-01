@@ -12,6 +12,10 @@ echo 正在打包 博思云 Telegram 自动回复系统 v2.0...
     --hidden-import "PySocks" ^
     --hidden-import "aiohttp" ^
     gui_app.py
+
+echo 复制 logo.ico 到输出目录...
+copy /y logo.ico dist\BosiCloud-AutoReply\logo.ico
+
 echo.
 echo 打包完成！输出目录: dist\BosiCloud-AutoReply\
 pause

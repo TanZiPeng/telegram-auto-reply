@@ -23,8 +23,13 @@ def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
 
-    # 设置应用级图标
+    # 设置应用级图标（打包后 logo.ico 在 _internal/ 或 exe 同级目录）
     icon_path = APP_DIR / "logo.ico"
+    if not icon_path.exists():
+        # PyInstaller onedir 模式下，add-data 文件在 _internal 目录
+        internal_path = APP_DIR / "_internal" / "logo.ico"
+        if internal_path.exists():
+            icon_path = internal_path
     if icon_path.exists():
         app.setWindowIcon(QIcon(str(icon_path)))
 

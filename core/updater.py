@@ -18,7 +18,7 @@ from typing import Optional, Tuple
 from PyQt6.QtCore import QThread, pyqtSignal
 
 # 当前版本号（每次发版时更新这里）
-CURRENT_VERSION = "2.0.1"
+CURRENT_VERSION = "2.0.2"
 
 # GitHub 仓库信息
 GITHUB_OWNER = "TanZiPeng"
@@ -107,16 +107,37 @@ class UpdateWorker(QThread):
     progress = pyqtSignal(int)       # 下载进度 0-100
     finished = pyqtSignal(bool, str) # (成功, 消息)
 
-    def __init__(self, download_url: str):
+    def __init__(self, download_url: str, proxy_settings: dict = None):
         super().__init__()
         self.download_url = download_url
+        self.proxy_settings = proxy_settings
+
+    def _make_opener(self):
+        """创建带代理的 opener"""
+        import urllib.request
+        import ssl
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        https_handler = urllib.request.HTTPSHandler(context=ctx)
+
+        if self.proxy_settings and self.proxy_settings.get("enabled"):
+            host = self.proxy_settings.get("host", "127.0.0.1")
+            port = self.proxy_settings.get("port", 7890)
+            proxy_url = f"http://{host}:{port}"
+            proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+            return urllib.request.build_opener(proxy_handler, https_handler)
+        else:
+            return urllib.request.build_opener(https_handler)
 
     def run(self):
         try:
-            # 下载到临时文件
+            opener = self._make_opener()
+
+            # 下载 zip
             self.progress.emit(5)
-            req = Request(self.download_url)
-            with urlopen(req, timeout=120) as resp:
+            req = Request(self.download_url, headers={"User-Agent": "BosiCloud-AutoReply/2.0"})
+            with opener.open(req, timeout=180) as resp:
                 total = int(resp.headers.get("Content-Length", 0))
                 data = bytearray()
                 downloaded = 0
@@ -127,50 +148,52 @@ class UpdateWorker(QThread):
                     data.extend(chunk)
                     downloaded += len(chunk)
                     if total > 0:
-                        self.progress.emit(int(downloaded / total * 80))
+                        self.progress.emit(int(downloaded / total * 70))
 
-            self.progress.emit(80)
+            self.progress.emit(75)
 
-            # 保存 zip
-            tmp_dir = tempfile.mkdtemp()
-            zip_path = Path(tmp_dir) / "update.zip"
+            # 保存到 exe 同级的 _update 目录（不用临时目录，防止被清理）
+            if getattr(sys, 'frozen', False):
+                app_dir = Path(sys.executable).parent
+            else:
+                app_dir = Path(__file__).parent.parent
+
+            update_dir = app_dir / "_update_temp"
+            if update_dir.exists():
+                shutil.rmtree(update_dir, ignore_errors=True)
+            update_dir.mkdir(parents=True, exist_ok=True)
+
+            zip_path = update_dir / "update.zip"
             with open(zip_path, "wb") as f:
                 f.write(data)
 
-            self.progress.emit(85)
+            self.progress.emit(80)
 
             # 解压
-            extract_dir = Path(tmp_dir) / "extracted"
+            extract_dir = update_dir / "extracted"
             with zipfile.ZipFile(zip_path, "r") as zf:
                 zf.extractall(extract_dir)
 
-            self.progress.emit(90)
+            self.progress.emit(85)
 
-            # 找到解压后的实际目录（可能有一层嵌套）
+            # 找到解压后的实际目录（zip 内可能有一层文件夹嵌套）
             contents = list(extract_dir.iterdir())
             if len(contents) == 1 and contents[0].is_dir():
                 source_dir = contents[0]
             else:
                 source_dir = extract_dir
 
-            # 替换文件到当前 exe 目录
-            if getattr(sys, 'frozen', False):
-                app_dir = Path(sys.executable).parent
-            else:
-                app_dir = Path(__file__).parent.parent
+            self.progress.emit(90)
 
-            self.progress.emit(92)
-
-            # 复制新文件（跳过用户数据文件）
+            # 复制新文件（跳过用户数据）
             skip_files = {"settings.json", "memory.db", "silence_list.json",
                          "tg_session.session", "tg_session.session-shm",
-                         "tg_session.session-wal"}
-            skip_dirs = {"chat_logs", "run_logs"}
+                         "tg_session.session-wal", "_update.bat"}
+            skip_dirs = {"chat_logs", "run_logs", "_update_temp"}
 
-            # 生成更新脚本（处理 exe 被锁的情况）
-            update_bat = app_dir / "_update.bat"
-            bat_commands = ['@echo off', 'echo 正在更新，请稍候...', 'timeout /t 2 /nobreak >nul']
-            needs_bat = False
+            # 收集被锁文件，写入 bat
+            locked_files = []
+            copied_count = 0
 
             for item in source_dir.rglob("*"):
                 rel = item.relative_to(source_dir)
@@ -186,28 +209,44 @@ class UpdateWorker(QThread):
                     target.parent.mkdir(parents=True, exist_ok=True)
                     try:
                         shutil.copy2(item, target)
+                        copied_count += 1
                     except PermissionError:
-                        # 文件被锁（exe 运行中），写入 bat 脚本延迟替换
-                        needs_bat = True
-                        bat_commands.append(f'copy /y "{item}" "{target}"')
+                        # 文件被锁，记录下来用 bat 替换
+                        locked_files.append((str(item), str(target)))
 
-            self.progress.emit(98)
+            self.progress.emit(95)
 
-            if needs_bat:
-                # 写入 bat：等待进程退出后替换文件并重启
-                exe_name = Path(sys.executable).name if getattr(sys, 'frozen', False) else ""
-                if exe_name:
-                    bat_commands.append(f'start "" "{app_dir / exe_name}"')
-                bat_commands.append(f'del "%~f0"')  # 自删除
-                update_bat.write_text("\n".join(bat_commands), encoding="gbk")
+            # 如果有被锁文件，生成更新脚本
+            if locked_files:
+                bat_lines = [
+                    '@echo off',
+                    'echo 正在完成更新，请勿关闭此窗口...',
+                    # 等待旧进程完全退出
+                    'timeout /t 5 /nobreak >nul',
+                ]
+                # 先复制所有被锁文件
+                for src, dst in locked_files:
+                    bat_lines.append(f'copy /y "{src}" "{dst}" >nul 2>&1')
 
-            self.progress.emit(100)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+                # 复制完成后再启动新 exe
+                if getattr(sys, 'frozen', False):
+                    exe_path = str(Path(sys.executable))
+                    bat_lines.append(f'start "" "{exe_path}"')
 
-            if needs_bat:
-                self.finished.emit(True, "更新已准备好，重启后自动完成替换。")
+                # 延迟后清理临时目录和 bat 自身
+                bat_lines.append('timeout /t 3 /nobreak >nul')
+                bat_lines.append(f'rmdir /s /q "{update_dir}"')
+                bat_lines.append('del "%~f0"')
+
+                bat_path = app_dir / "_update.bat"
+                bat_path.write_text("\n".join(bat_lines), encoding="gbk")
+                self.progress.emit(100)
+                self.finished.emit(True, f"更新已下载（{copied_count} 个文件已替换，{len(locked_files)} 个文件需重启后替换）。\n点击重启完成更新。")
             else:
-                self.finished.emit(True, "更新完成，请重启程序以应用新版本。")
+                # 全部替换成功，清理临时目录
+                shutil.rmtree(update_dir, ignore_errors=True)
+                self.progress.emit(100)
+                self.finished.emit(True, f"更新完成（{copied_count} 个文件已替换）。\n请重启程序以应用新版本。")
 
         except Exception as e:
             self.finished.emit(False, f"更新失败: {e}")

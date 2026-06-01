@@ -151,6 +151,8 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(self)
         from core.config import APP_DIR
         icon_path = APP_DIR / "logo.ico"
+        if not icon_path.exists():
+            icon_path = APP_DIR / "_internal" / "logo.ico"
         if icon_path.exists():
             self.tray.setIcon(QIcon(str(icon_path)))
         else:
@@ -350,7 +352,13 @@ class MainWindow(QMainWindow):
     def _start_update(self, url: str):
         """开始下载更新"""
         self.log_tab.append("[开始下载更新...]", "info")
-        self._update_worker = UpdateWorker(url)
+        proxy_settings = {
+            "enabled": self.settings.get("proxy_enabled", False),
+            "type": self.settings.get("proxy_type", "http"),
+            "host": self.settings.get("proxy_host", "127.0.0.1"),
+            "port": self.settings.get("proxy_port", 7890),
+        }
+        self._update_worker = UpdateWorker(url, proxy_settings)
         self._update_worker.progress.connect(
             lambda p: self.log_tab.append(f"[下载进度: {p}%]", "info") if p % 20 == 0 else None
         )
